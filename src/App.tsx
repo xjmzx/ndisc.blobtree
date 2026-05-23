@@ -4,6 +4,7 @@ import { Filters, type FilterState } from "./components/Filters";
 import { LibraryTree } from "./components/LibraryTree";
 import { StatusBar } from "./components/StatusBar";
 import { WorkspacePanel } from "./components/WorkspacePanel";
+import { FeedPanel } from "./components/FeedPanel";
 import { NostrPanel } from "./components/NostrPanel";
 import {
   loadReport,
@@ -11,6 +12,7 @@ import {
   type ScanRow,
   type Verdict,
 } from "./lib/tauri";
+import { loadIdentity, type Identity } from "./lib/nostr";
 
 const DEFAULT_ROOT = "/data/music";
 
@@ -21,6 +23,12 @@ export default function App() {
   const [status, setStatus] = useState<{ text: string; tone: "muted" | "warn" | "ok" | "alert" }>(
     { text: "ready", tone: "muted" },
   );
+  const [identity, setIdentity] = useState<Identity | null>(null);
+
+  // Hydrate the local nsec on mount.
+  useEffect(() => {
+    setIdentity(loadIdentity());
+  }, []);
 
   // Hydrate the last saved report on mount.
   useEffect(() => {
@@ -114,7 +122,7 @@ export default function App() {
           />
         </div>
 
-        {/* Right column: Workspace (mirror tree) + Nostr placeholder */}
+        {/* Right column: Workspace · Listen (Nostr feed) · Publish stub */}
         <div className="flex flex-col gap-4 min-h-0 overflow-auto">
           <WorkspacePanel
             rows={filteredRows}
@@ -122,7 +130,8 @@ export default function App() {
             anyFilter={anyFilter}
             onStatus={setStatus}
           />
-          <NostrPanel />
+          <FeedPanel identity={identity} />
+          <NostrPanel identity={identity} setIdentity={setIdentity} />
         </div>
       </div>
 
