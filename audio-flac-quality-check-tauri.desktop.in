@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=FLAC Library Browser
-GenericName=Audio Library Quality Browser
-Comment=Browse a FLAC library and detect lossy-source files via spectral analysis
+Name=ndisc.blobtree
+GenericName=FLAC Library Quality Browser
+Comment=Browse a FLAC library and detect lossy-source files via spectral analysis (formerly FLAC Library Browser)
 Exec=@BINDIR@/audio-flac-quality-check-tauri
 Icon=@ICONDIR@/audio-flac-quality-check-tauri.svg
 Terminal=false

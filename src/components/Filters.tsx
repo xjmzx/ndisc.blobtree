@@ -44,7 +44,7 @@ export function Filters({ filter, setFilter, counts, total }: FiltersProps) {
         <select
           value={filter.verdict}
           onChange={(e) => setFilter({ ...filter, verdict: e.target.value as FilterState["verdict"] })}
-          className="px-3 py-2 rounded-md bg-surface text-fg outline-none
+          className="px-3 py-2 rounded-md bg-bg text-fg outline-none
                      border border-transparent focus:border-accent/50 text-sm"
         >
           <option value="All">All</option>
@@ -75,7 +75,7 @@ export function Filters({ filter, setFilter, counts, total }: FiltersProps) {
       </div>
 
       {total > 0 && (
-        <div className="text-xs text-muted flex flex-wrap gap-x-4 gap-y-1">
+        <div className="mt-2 text-xs text-muted flex flex-wrap gap-x-4 gap-y-1">
           <span>{total.toLocaleString()} tracks</span>
           {VERDICTS.filter((v) => counts[v] > 0).map((v) => (
             <span key={v} className={VERDICT_COLOR[v]}>

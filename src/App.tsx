@@ -121,11 +121,12 @@ export default function App() {
                 : "Theme: upleb.uk — click to switch to fizx.uk"
             }
             aria-label="Switch colour theme"
-            className="text-3xl font-bold text-accent tracking-tight
-                       leading-none shrink-0 cursor-pointer transition-opacity
-                       hover:opacity-70"
+            className="text-3xl font-bold tracking-tight leading-none shrink-0
+                       cursor-pointer transition-opacity hover:opacity-70"
           >
-            FLAC<span className="text-fg"> Library Browser</span>
+            <span className="text-accent">n</span>
+            <span className="text-fg">disc</span>
+            <span className="text-mauve">.blobtree</span>
           </button>
           {appVersion && (
             <span
