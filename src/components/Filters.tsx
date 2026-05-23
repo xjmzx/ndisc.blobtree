@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Filter, Search } from "lucide-react";
+import { ChevronDown, Filter, Search } from "lucide-react";
 import { Section } from "./Section";
 import { VERDICTS, type Verdict } from "../lib/tauri";
 
@@ -41,19 +41,28 @@ export function Filters({ filter, setFilter, counts, total }: FiltersProps) {
   return (
     <Section title="Filter" icon={<Filter size={16} />}>
       <div className="flex flex-wrap gap-3 items-center">
-        <select
-          value={filter.verdict}
-          onChange={(e) => setFilter({ ...filter, verdict: e.target.value as FilterState["verdict"] })}
-          className="px-3 py-2 rounded-md bg-bg text-fg outline-none
-                     border border-transparent focus:border-accent/50 text-sm"
-        >
-          <option value="All">All</option>
-          {VERDICTS.map((v) => (
-            <option key={v} value={v}>
-              {v}
-            </option>
-          ))}
-        </select>
+        {/* appearance-none + custom chevron because WebKit2GTK applies the
+            system GTK theme to native <select> (often white-on-grey),
+            ignoring our bg-bg / text-fg. */}
+        <div className="relative">
+          <select
+            value={filter.verdict}
+            onChange={(e) => setFilter({ ...filter, verdict: e.target.value as FilterState["verdict"] })}
+            className="appearance-none pl-3 pr-8 py-2 rounded-md bg-bg text-fg outline-none
+                       border border-transparent focus:border-accent/50 text-sm cursor-pointer"
+          >
+            <option value="All">All</option>
+            {VERDICTS.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            size={14}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted pointer-events-none"
+          />
+        </div>
 
         <div className="flex-1 min-w-[200px] relative">
           <Search
