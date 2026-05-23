@@ -47,9 +47,11 @@ export default function App() {
     getVersion().then(setAppVersion).catch(() => setAppVersion(null));
   }, []);
 
-  // Hydrate the local nsec on mount.
+  // Hydrate identity from the OS keychain on mount.
   useEffect(() => {
-    setIdentity(loadIdentity());
+    loadIdentity()
+      .then(setIdentity)
+      .catch(() => setIdentity(null));
   }, []);
 
   // Hydrate the last saved report on mount.
@@ -192,10 +194,10 @@ export default function App() {
             </span>
             <span
               className="inline-flex items-center gap-1"
-              title="secret key in browser localStorage (migrating to OS keychain)"
+              title="secret key stored in OS keychain (libsecret on Linux)"
             >
               <Lock size={11} />
-              <span>nsec stored locally</span>
+              <span>nsec in keychain</span>
             </span>
           </span>
         )}

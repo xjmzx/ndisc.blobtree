@@ -27,3 +27,7 @@ rayon = "1"
 walkdir = "2"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Nostr identity: keypair generation, bech32 nsec/npub encoding. Matches ndisc.
+nostr = "0.43"
+# OS keychain (libsecret on Linux via secret-service). Matches ndisc.
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }

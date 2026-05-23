@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { KeyRound, Radio, Sparkles, Trash2 } from "lucide-react";
+import { Check, Copy, KeyRound, Radio, Sparkles, Trash2 } from "lucide-react";
 import { Section } from "./Section";
 import {
   clearIdentity,
@@ -9,11 +9,11 @@ import {
   type Identity,
 } from "../lib/nostr";
 
-// Stub: publish action not wired yet (no obvious thing to publish from a
-// quality scanner). Identity scaffolding is real though — FeedPanel's
-// "me only" toggle relies on it, and a future publish flow can plug in.
-// When that arrives, port NIP-96 upload + NIP-94 publish from
-// smpl-tool's lib/nostr.ts.
+// Stub for publishing — no obvious thing for a quality scanner to push
+// yet. Identity scaffolding is real: nsec lives in the OS keychain via
+// the Rust `keyring` crate (libsecret on Linux), and the same identity
+// powers FeedPanel's "me only" toggle. When a publish use case appears,
+// port NIP-96 upload + NIP-94 publish from smpl-tool's lib/nostr.ts.
 
 interface NostrPanelProps {
   identity: Identity | null;
@@ -23,27 +23,62 @@ interface NostrPanelProps {
 export function NostrPanel({ identity, setIdentity }: NostrPanelProps) {
   const [input, setInput] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [backupNsec, setBackupNsec] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
-  function handleSave() {
+  async function handleSave() {
     setErr(null);
+    setBusy(true);
     try {
-      setIdentity(saveKey(input));
+      const id = await saveKey(input);
+      setIdentity(id);
       setInput("");
     } catch (e) {
       setErr(String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
-  function handleGenerate() {
+  async function handleGenerate() {
     setErr(null);
-    setIdentity(generateIdentity());
+    setBusy(true);
+    try {
+      const id = await generateIdentity();
+      setIdentity({ npub: id.npub, pk: id.pk });
+      setBackupNsec(id.nsec);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function handleClear() {
-    clearIdentity();
-    setIdentity(null);
-    setInput("");
+  async function handleClear() {
     setErr(null);
+    setBusy(true);
+    try {
+      await clearIdentity();
+      setIdentity(null);
+      setInput("");
+      setBackupNsec(null);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCopyNsec() {
+    if (!backupNsec) return;
+    try {
+      await navigator.clipboard.writeText(backupNsec);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard denied */
+    }
   }
 
   return (
@@ -63,8 +98,9 @@ export function NostrPanel({ identity, setIdentity }: NostrPanelProps) {
             </span>
             <button
               onClick={handleClear}
-              title="Forget this key"
-              className="text-muted hover:text-alert shrink-0"
+              disabled={busy}
+              title="Forget this key (removes from OS keychain)"
+              className="text-muted hover:text-alert shrink-0 disabled:opacity-50"
             >
               <Trash2 size={12} />
             </button>
@@ -77,16 +113,17 @@ export function NostrPanel({ identity, setIdentity }: NostrPanelProps) {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSave()}
-                placeholder="nsec1… or 64-char hex"
+                placeholder="nsec1…"
+                disabled={busy}
                 className="flex-1 px-2.5 py-1.5 rounded-md bg-surface text-fg
                            placeholder:text-muted outline-none border border-transparent
-                           focus:border-accent/50 text-xs font-mono"
+                           focus:border-accent/50 text-xs font-mono disabled:opacity-50"
                 spellCheck={false}
                 autoComplete="off"
               />
               <button
                 onClick={handleSave}
-                disabled={!input.trim()}
+                disabled={!input.trim() || busy}
                 className="px-2.5 py-1.5 rounded-md bg-surface hover:bg-surfaceHover
                            text-fg disabled:opacity-50 text-xs"
               >
@@ -95,24 +132,58 @@ export function NostrPanel({ identity, setIdentity }: NostrPanelProps) {
             </div>
             <button
               onClick={handleGenerate}
+              disabled={busy}
               className="w-full px-2.5 py-1.5 rounded-md bg-surface hover:bg-surfaceHover
-                         text-fg text-xs flex items-center justify-center gap-1.5"
+                         text-fg text-xs flex items-center justify-center gap-1.5
+                         disabled:opacity-50"
             >
               <Sparkles size={12} />
               Generate new key
             </button>
-            {err && (
-              <p className="text-[10px] text-alert font-mono break-all">{err}</p>
-            )}
           </div>
+        )}
+        {err && (
+          <p className="text-[10px] text-alert font-mono break-all mt-2">{err}</p>
         )}
       </div>
 
+      {backupNsec && (
+        <div className="rounded-md bg-warn/10 border border-warn/40 px-2.5 py-2 space-y-1.5">
+          <div className="text-[10px] uppercase tracking-wide text-warn font-semibold">
+            Back up your secret key
+          </div>
+          <p className="text-[11px] text-fg/80">
+            The nsec is stored in your OS keychain, but it&apos;s only shown
+            here once. Copy it somewhere safe — you can&apos;t recover it later.
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="font-mono text-[10px] text-fg truncate flex-1
+                             rounded bg-bg/60 px-2 py-1">
+              {backupNsec}
+            </code>
+            <button
+              onClick={handleCopyNsec}
+              className="text-muted hover:text-fg shrink-0"
+              title={copied ? "Copied" : "Copy nsec"}
+            >
+              {copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
+            </button>
+          </div>
+          <button
+            onClick={() => setBackupNsec(null)}
+            className="text-[10px] text-muted hover:text-fg underline"
+          >
+            I&apos;ve saved it — dismiss
+          </button>
+        </div>
+      )}
+
       <p className="text-xs text-muted leading-relaxed">
         Publish action not wired — no obvious thing for a quality scanner to
-        push yet. The identity above already powers FeedPanel's <em>me only</em>
-        {" "}toggle. When a publish use case appears, port{" "}
-        <code className="text-fg/80">lib/nostr.ts</code> from{" "}
+        push yet. The identity above lives in the OS keychain (libsecret on
+        Linux) and powers FeedPanel&apos;s <em>me only</em> toggle. When a
+        publish use case appears, port{" "}
+        <code className="text-fg/80">lib/nostr.ts</code> upload + publish from{" "}
         <code className="text-fg/80">smpl-tool</code>.
       </p>
 

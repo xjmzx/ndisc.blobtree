@@ -12,6 +12,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::available_parallelism;
 
+use keyring::Entry;
+use nostr::nips::nip19::{FromBech32, ToBech32};
+use nostr::{Keys, SecretKey};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -22,6 +25,20 @@ const HIGHPASS_HZ: u32 = 16_000;
 const LOSSY_DB: f32 = -65.0;
 const LOSSLESS_DB: f32 = -35.0;
 const REPORT_FILENAME: &str = "last_scan.json";
+const KEYRING_SERVICE_RELEASE: &str = "audio-flac-quality-check-tauri";
+const KEYRING_SERVICE_DEV: &str = "audio-flac-quality-check-tauri-dev";
+const KEYRING_USER: &str = "default";
+
+/// Debug builds (`tauri dev`) use a separate keychain service so dev
+/// state never reads or writes the real installed-app nsec. Matches
+/// ndisc's pattern.
+fn keyring_service() -> &'static str {
+    if cfg!(debug_assertions) {
+        KEYRING_SERVICE_DEV
+    } else {
+        KEYRING_SERVICE_RELEASE
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 enum Verdict {
@@ -443,13 +460,36 @@ fn scan_inner(root: String, workers: Option<usize>, app: AppHandle) -> Result<Sc
     })
 }
 
-fn report_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
+/// Debug builds (`tauri dev`) get a sibling app-data dir with a `.dev`
+/// suffix, so dev runs don't pollute the installed binary's scan report.
+/// Mirrors the keyring service split above.
+fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let base = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("app_data_dir: {e}"))?;
+    let dir = if cfg!(debug_assertions) {
+        let name = base
+            .file_name()
+            .map(|n| {
+                let mut s = n.to_os_string();
+                s.push(".dev");
+                s
+            })
+            .ok_or_else(|| "app_data_dir has no final component".to_string())?;
+        match base.parent() {
+            Some(parent) => parent.join(name),
+            None => PathBuf::from(name),
+        }
+    } else {
+        base
+    };
     fs::create_dir_all(&dir).map_err(|e| format!("create app_data_dir: {e}"))?;
-    Ok(dir.join(REPORT_FILENAME))
+    Ok(dir)
+}
+
+fn report_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(data_dir(app)?.join(REPORT_FILENAME))
 }
 
 #[tauri::command]
@@ -480,6 +520,98 @@ fn open_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---- nostr identity (OS keychain) -------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Identity {
+    npub: String,
+    pk: String, // hex pubkey, for relay author filters
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedIdentity {
+    npub: String,
+    pk: String,
+    /// Returned ONCE on generate so the user can back the key up. After
+    /// `get_identity`, only npub + pk are returned; nsec stays in the
+    /// keychain.
+    nsec: String,
+}
+
+fn keyring_entry() -> Result<Entry, String> {
+    Entry::new(keyring_service(), KEYRING_USER).map_err(|e| e.to_string())
+}
+
+fn load_nsec() -> Result<Option<String>, String> {
+    match keyring_entry()?.get_password() {
+        Ok(s) => Ok(Some(s)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn store_nsec(nsec: &str) -> Result<(), String> {
+    keyring_entry()?
+        .set_password(nsec)
+        .map_err(|e| e.to_string())
+}
+
+fn keys_from_nsec(nsec: &str) -> Result<Keys, String> {
+    let sk = SecretKey::from_bech32(nsec).map_err(|e| format!("invalid nsec: {e}"))?;
+    Ok(Keys::new(sk))
+}
+
+fn identity_from_keys(keys: &Keys) -> Result<Identity, String> {
+    let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
+    let pk = keys.public_key().to_hex();
+    Ok(Identity { npub, pk })
+}
+
+#[tauri::command]
+fn get_identity() -> Result<Option<Identity>, String> {
+    let Some(nsec) = load_nsec()? else {
+        return Ok(None);
+    };
+    let keys = keys_from_nsec(&nsec)?;
+    Ok(Some(identity_from_keys(&keys)?))
+}
+
+#[tauri::command]
+fn generate_identity() -> Result<GeneratedIdentity, String> {
+    let keys = Keys::generate();
+    let nsec = keys
+        .secret_key()
+        .to_bech32()
+        .map_err(|e| e.to_string())?;
+    let id = identity_from_keys(&keys)?;
+    store_nsec(&nsec)?;
+    Ok(GeneratedIdentity {
+        npub: id.npub,
+        pk: id.pk,
+        nsec,
+    })
+}
+
+#[tauri::command]
+fn import_identity(nsec: String) -> Result<Identity, String> {
+    let nsec = nsec.trim().to_owned();
+    let keys = keys_from_nsec(&nsec)?;
+    let id = identity_from_keys(&keys)?;
+    store_nsec(&nsec)?;
+    Ok(id)
+}
+
+#[tauri::command]
+fn clear_identity() -> Result<(), String> {
+    match keyring_entry()?.delete_credential() {
+        Ok(_) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -491,7 +623,11 @@ pub fn run() {
             create_mirror_tree,
             load_report,
             save_report,
-            open_folder
+            open_folder,
+            get_identity,
+            generate_identity,
+            import_identity,
+            clear_identity
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
