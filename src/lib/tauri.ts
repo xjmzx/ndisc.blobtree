@@ -42,6 +42,17 @@ export interface FlacCount {
   totalBytes: number;
 }
 
+export interface MirrorPair {
+  artist: string;
+  release: string;
+}
+
+export interface MirrorResult {
+  created: number;
+  skipped: number;
+  errors: string[];
+}
+
 export async function scanLibrary(
   root: string,
   workers?: number,
@@ -51,6 +62,13 @@ export async function scanLibrary(
 
 export async function countFlacFiles(root: string): Promise<FlacCount> {
   return invoke<FlacCount>("count_flac_files", { root });
+}
+
+export async function createMirrorTree(
+  dest: string,
+  pairs: MirrorPair[],
+): Promise<MirrorResult> {
+  return invoke<MirrorResult>("create_mirror_tree", { dest, pairs });
 }
 
 export async function loadReport(): Promise<ScanReport | null> {

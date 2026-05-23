@@ -3,6 +3,7 @@ import { ScannerControls } from "./components/ScannerControls";
 import { Filters, type FilterState } from "./components/Filters";
 import { LibraryTree } from "./components/LibraryTree";
 import { StatusBar } from "./components/StatusBar";
+import { WorkspacePanel } from "./components/WorkspacePanel";
 import { NostrPanel } from "./components/NostrPanel";
 import {
   loadReport,
@@ -113,8 +114,16 @@ export default function App() {
           />
         </div>
 
-        {/* Right column: Nostr placeholder (suite-uniform slot) */}
-        <NostrPanel />
+        {/* Right column: Workspace (mirror tree) + Nostr placeholder */}
+        <div className="flex flex-col gap-4 min-h-0 overflow-auto">
+          <WorkspacePanel
+            rows={filteredRows}
+            libRoot={libRoot}
+            anyFilter={anyFilter}
+            onStatus={setStatus}
+          />
+          <NostrPanel />
+        </div>
       </div>
 
       <StatusBar text={status.text} tone={status.tone} />

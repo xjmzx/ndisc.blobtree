@@ -211,6 +211,70 @@ async fn count_flac_files(root: String) -> Result<FlacCount, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MirrorPair {
+    artist: String,
+    release: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MirrorResult {
+    created: usize,
+    skipped: usize,
+    errors: Vec<String>,
+}
+
+#[tauri::command]
+async fn create_mirror_tree(
+    dest: String,
+    pairs: Vec<MirrorPair>,
+) -> Result<MirrorResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dest_pb = PathBuf::from(&dest);
+        if dest_pb.exists() && !dest_pb.is_dir() {
+            return Err(format!("destination exists and is not a directory: {dest}"));
+        }
+        fs::create_dir_all(&dest_pb)
+            .map_err(|e| format!("create {}: {e}", dest_pb.display()))?;
+
+        let mut created = 0usize;
+        let mut skipped = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for pair in pairs {
+            // Strip any leading "/" or ".." from artist/release to keep the
+            // resulting path strictly under `dest`.
+            let artist = sanitize(&pair.artist);
+            let release = sanitize(&pair.release);
+            if artist.is_empty() || release.is_empty() {
+                errors.push(format!("skipped empty pair: {:?}/{:?}", pair.artist, pair.release));
+                continue;
+            }
+            let target = dest_pb.join(&artist).join(&release);
+            if target.exists() {
+                skipped += 1;
+                continue;
+            }
+            match fs::create_dir_all(&target) {
+                Ok(()) => created += 1,
+                Err(e) => errors.push(format!("{}: {e}", target.display())),
+            }
+        }
+        Ok(MirrorResult { created, skipped, errors })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn sanitize(component: &str) -> String {
+    component
+        .trim()
+        .trim_matches('/')
+        .replace("..", "_")
+        .replace('\0', "")
+}
+
 #[tauri::command]
 async fn scan_library(
     root: String,
@@ -331,6 +395,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_library,
             count_flac_files,
+            create_mirror_tree,
             load_report,
             save_report,
             open_folder
