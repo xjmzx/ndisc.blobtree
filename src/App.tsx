@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { KeyRound, Lock } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
+import { SimplePool } from "nostr-tools";
 import { ScannerControls } from "./components/ScannerControls";
 import { Filters, type FilterState } from "./components/Filters";
 import { LibraryTree } from "./components/LibraryTree";
@@ -18,7 +19,14 @@ import { loadIdentity, shortNpub, type Identity } from "./lib/nostr";
 
 const DEFAULT_ROOT = "/data/music";
 const THEME_KEY = "afqc-tauri.theme";
+const PROFILE_RELAYS = ["wss://relay.fizx.uk"];
 type Theme = "fizx" | "upleb";
+
+interface ProfileMeta {
+  name?: string;
+  display_name?: string;
+  nip05?: string;
+}
 
 function loadTheme(): Theme {
   const v = localStorage.getItem(THEME_KEY);
@@ -33,6 +41,7 @@ export default function App() {
     { text: "ready", tone: "muted" },
   );
   const [identity, setIdentity] = useState<Identity | null>(null);
+  const [profile, setProfile] = useState<ProfileMeta | null>(null);
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const [appVersion, setAppVersion] = useState<string | null>(null);
 
@@ -53,6 +62,38 @@ export default function App() {
       .then(setIdentity)
       .catch(() => setIdentity(null));
   }, []);
+
+  // Best-effort profile fetch (kind:0 metadata) for display_name / name.
+  // Mirrors ndisc's pattern. Silent on failure — npub stays as-is if the
+  // relay has no metadata for this pubkey.
+  useEffect(() => {
+    if (!identity) {
+      setProfile(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const pool = new SimplePool();
+        const event = await pool.get(PROFILE_RELAYS, {
+          kinds: [0],
+          authors: [identity.pk],
+        });
+        pool.close(PROFILE_RELAYS);
+        if (cancelled || !event) return;
+        try {
+          setProfile(JSON.parse(event.content) as ProfileMeta);
+        } catch {
+          /* malformed metadata, leave profile as null */
+        }
+      } catch {
+        /* best-effort fetch, leave profile as null */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [identity?.pk]);
 
   // Hydrate the last saved report on mount.
   useEffect(() => {
@@ -188,8 +229,16 @@ export default function App() {
       <footer className="shrink-0 flex flex-wrap items-center justify-between
                          gap-x-8 gap-y-1 text-xs text-muted">
         <span>stack: Tauri 2 + React + TypeScript + Tailwind · matches smpl-tool / ndisc</span>
+
+        {/* Centered identity chip — middle child of a flex justify-between
+            row, same pattern as ndisc's footer. */}
         {identity ? (
           <span className="inline-flex items-center gap-2 min-w-0">
+            {(profile?.display_name || profile?.name) && (
+              <span className="text-fg/80 truncate">
+                {profile?.display_name || profile?.name}
+              </span>
+            )}
             <span className="font-mono text-mauve" title={identity.npub}>
               {shortNpub(identity.npub)}
             </span>
@@ -198,7 +247,7 @@ export default function App() {
               title="signed in · nsec stored in OS keychain (libsecret on Linux)"
             >
               <Lock size={11} />
-              <span>signed in · nsec in keychain</span>
+              <span>nsec stored in keychain</span>
             </span>
           </span>
         ) : (
@@ -209,6 +258,18 @@ export default function App() {
             <KeyRound size={11} className="opacity-60" />
             <span>not signed in · no key in keychain</span>
           </span>
+        )}
+
+        {/* Last-scan chip on the right (or placeholder so the identity
+            chip remains visually centered when no report is loaded). */}
+        {report ? (
+          <span
+            title={`Last scan: ${report.generated} · ${report.rows.length.toLocaleString()} files · root ${report.root}`}
+          >
+            scan: {report.generated.slice(0, 10)} · {report.rows.length.toLocaleString()} files
+          </span>
+        ) : (
+          <span className="opacity-0">·</span>
         )}
       </footer>
     </div>
