@@ -16,7 +16,9 @@ import { type Identity, shortNpub } from "../lib/nostr";
 import { useReactions } from "../hooks/useReactions";
 import { REACTION_DOWN, REACTION_UP, displayCount } from "../lib/rating";
 
-const RELAY_URL = "wss://relay.fizx.uk";
+// TODO(relays): currently consumes only the first relay from the prop —
+// raw WebSocket logic predates the multi-relay set. Refactor to SimplePool
+// when the editable relay list lands suite-wide.
 const KIND = 1063;
 const LIMIT = 50;
 
@@ -76,10 +78,12 @@ function npubFromHex(hex: string): string {
 type Status = "idle" | "connecting" | "ready" | "error";
 
 interface FeedPanelProps {
+  relays: string[];
   identity: Identity | null;
 }
 
-export function FeedPanel({ identity }: FeedPanelProps) {
+export function FeedPanel({ identity, relays }: FeedPanelProps) {
+  const RELAY_URL = relays[0] ?? "wss://relay.fizx.uk";
   const [events, setEvents] = useState<NostrEvent[]>([]);
   const [status, setStatus] = useState<Status>("idle");
   const [errMsg, setErrMsg] = useState<string | null>(null);

@@ -5,14 +5,17 @@ import { Section } from "./Section";
 import { cn } from "../lib/cn";
 import {
   cancelScan,
-  countFlacFiles,
+  countAudioFiles,
   onScanProgress,
   saveReport,
   scanLibrary,
-  type FlacCount,
+  type AudioCount,
   type ScanProgress,
   type ScanReport,
 } from "../lib/tauri";
+import { usePersistedBool } from "../lib/usePersistedString";
+
+const EXPANDED_KEY = "afqc-tauri.scanner.expanded";
 
 // Heuristic for the pre-scan ETA. cpu/2 workers each doing ~ffmpeg
 // startup + decode ≈ 1–2 files/sec; tune by observation if it drifts
@@ -22,7 +25,7 @@ const FILES_PER_SEC = 8;
 type State =
   | { kind: "idle" }
   | { kind: "counting" }
-  | { kind: "confirming"; count: FlacCount }
+  | { kind: "confirming"; count: AudioCount }
   | { kind: "scanning" };
 
 interface ScannerControlsProps {
@@ -48,6 +51,7 @@ function formatEta(seconds: number): string {
 }
 
 export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerControlsProps) {
+  const [expanded, setExpanded] = usePersistedBool(EXPANDED_KEY, true);
   const [state, setState] = useState<State>({ kind: "idle" });
   const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -84,10 +88,10 @@ export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerCo
     setState({ kind: "counting" });
     onStatus({ text: "counting files…", tone: "warn" });
     try {
-      const count = await countFlacFiles(root.trim());
+      const count = await countAudioFiles(root.trim());
       if (count.fileCount === 0) {
         setState({ kind: "idle" });
-        onStatus({ text: `no .flac files under ${root.trim()}`, tone: "alert" });
+        onStatus({ text: `no audio files under ${root.trim()}`, tone: "alert" });
         return;
       }
       setState({ kind: "confirming", count });
@@ -160,7 +164,13 @@ export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerCo
   const pct = progress ? Math.round((100 * progress.done) / Math.max(1, progress.total)) : 0;
 
   return (
-    <Section title="Scanner" icon={<ScanLine size={16} />}>
+    <Section
+      title="Scanner"
+      icon={<ScanLine size={16} />}
+      onTitleClick={() => setExpanded(!expanded)}
+    >
+      {expanded && (
+        <>
       <div className="flex gap-2">
         <input
           type="text"
@@ -258,6 +268,8 @@ export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerCo
             />
           </div>
         </div>
+      )}
+        </>
       )}
     </Section>
   );

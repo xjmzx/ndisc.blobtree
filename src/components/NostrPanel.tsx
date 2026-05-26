@@ -18,9 +18,16 @@ import {
 interface NostrPanelProps {
   identity: Identity | null;
   setIdentity: (i: Identity | null) => void;
+  /**
+   * Relay set to publish + read from. Currently sourced from the app-level
+   * constant; the editable + persisted list (smpl-tool-style) is the next
+   * iteration, along with threading these into the Rust publish_reaction
+   * / delete_reaction commands (still hardcoded server-side).
+   */
+  relays: string[];
 }
 
-export function NostrPanel({ identity, setIdentity }: NostrPanelProps) {
+export function NostrPanel({ identity, setIdentity, relays }: NostrPanelProps) {
   const [input, setInput] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -145,6 +152,25 @@ export function NostrPanel({ identity, setIdentity }: NostrPanelProps) {
         {err && (
           <p className="text-[10px] text-alert font-mono break-all mt-2">{err}</p>
         )}
+      </div>
+
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-muted mb-1">
+          Relays
+        </div>
+        <ul className="rounded-md bg-bg/50 px-2.5 py-1.5 space-y-0.5">
+          {relays.map((r) => (
+            <li key={r} className="flex items-center gap-2 text-xs font-mono">
+              <Radio size={10} className="text-muted shrink-0" />
+              <span className="text-fg/90 truncate">
+                {r.replace(/^wss:\/\//, "")}
+              </span>
+            </li>
+          ))}
+        </ul>
+        <p className="text-[10px] text-muted mt-1">
+          Read-only for now — editable list lands in the next iteration.
+        </p>
       </div>
 
       {backupNsec && (

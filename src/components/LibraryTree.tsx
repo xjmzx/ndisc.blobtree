@@ -5,6 +5,7 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
   FolderTree,
+  Scissors,
 } from "lucide-react";
 import { Section } from "./Section";
 import { cn } from "../lib/cn";
@@ -15,7 +16,7 @@ const VERDICT_COLOR: Record<Verdict, string> = {
   LOSSLESS: "text-ok",
   "PROBABLY-LOSSY": "text-alert",
   UNCERTAIN: "text-warn",
-  "NOT-FLAC": "text-muted",
+  LOSSY: "text-mauve",
   UNKNOWN: "text-muted",
 };
 
@@ -67,7 +68,7 @@ function countsFor(tracks: TrackRow[]): Record<Verdict, number> {
     LOSSLESS: 0,
     "PROBABLY-LOSSY": 0,
     UNCERTAIN: 0,
-    "NOT-FLAC": 0,
+    LOSSY: 0,
     UNKNOWN: 0,
   };
   for (const t of tracks) c[t.verdict]++;
@@ -75,7 +76,7 @@ function countsFor(tracks: TrackRow[]): Record<Verdict, number> {
 }
 
 function breakdown(c: Record<Verdict, number>): string {
-  const order: Verdict[] = ["LOSSLESS", "UNCERTAIN", "PROBABLY-LOSSY", "NOT-FLAC", "UNKNOWN"];
+  const order: Verdict[] = ["LOSSLESS", "UNCERTAIN", "PROBABLY-LOSSY", "LOSSY", "UNKNOWN"];
   return order
     .filter((v) => c[v] > 0)
     .map((v) => `${c[v]} ${v.split("-")[0].toLowerCase()}`)
@@ -87,9 +88,17 @@ interface LibraryTreeProps {
   libRoot: string;
   anyFilter: boolean;
   onOpenStatus: (s: { text: string; tone: "muted" | "warn" | "ok" | "alert" }) => void;
+  /**
+   * Per-scope Sample action. `label` is the human-readable scope name
+   * (artist name, or "artist / album"), used for confirmation copy +
+   * status. `tracks` is the exact row subset to sample. Layout-only for
+   * now — the implementation in App.tsx just emits a status message
+   * until backend lands.
+   */
+  onSampleScope: (label: string, tracks: ScanRow[]) => void;
 }
 
-export function LibraryTree({ rows, libRoot, anyFilter, onOpenStatus }: LibraryTreeProps) {
+export function LibraryTree({ rows, libRoot, anyFilter, onOpenStatus, onSampleScope }: LibraryTreeProps) {
   const artists = useMemo(() => group(rows, libRoot), [rows, libRoot]);
   const [openArtists, setOpenArtists] = useState<Set<string>>(new Set());
   const [openAlbums, setOpenAlbums] = useState<Set<string>>(new Set());
@@ -175,23 +184,35 @@ export function LibraryTree({ rows, libRoot, anyFilter, onOpenStatus }: LibraryT
         )}
         {artists.map((artist) => {
           const isOpen = openArtists.has(artist.name);
-          const ac = countsFor(artist.albums.flatMap((a) => a.tracks));
+          const allArtistTracks = artist.albums.flatMap((a) => a.tracks);
+          const ac = countsFor(allArtistTracks);
           return (
             <div key={artist.name}>
-              <button
-                onClick={() => toggleArtist(artist.name)}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                           hover:bg-surface/30 text-accent font-semibold text-sm"
-              >
-                {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                <span className="flex-1 truncate">{artist.name}</span>
-                <span className="text-xs text-muted font-normal">
-                  {artist.albums.length} albums · {artist.totalTracks} tracks
-                </span>
-                <span className="text-xs text-muted font-normal hidden md:inline">
-                  {breakdown(ac)}
-                </span>
-              </button>
+              <div className="w-full flex items-center pr-2 py-1.5 hover:bg-surface/30">
+                <button
+                  onClick={() => toggleArtist(artist.name)}
+                  className="flex-1 min-w-0 flex items-center gap-2 px-3 text-left
+                             text-accent font-semibold text-sm"
+                >
+                  {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <span className="flex-1 truncate">{artist.name}</span>
+                  <span className="text-xs text-muted font-normal">
+                    {artist.albums.length} albums · {artist.totalTracks} tracks
+                  </span>
+                  <span className="text-xs text-muted font-normal hidden md:inline">
+                    {breakdown(ac)}
+                  </span>
+                </button>
+                <button
+                  onClick={() => onSampleScope(artist.name, allArtistTracks)}
+                  title={`Sample ${artist.totalTracks} tracks across ${artist.albums.length} albums — 10s each`}
+                  className="ml-2 px-2 py-1 rounded text-muted hover:text-accent
+                             hover:bg-surface/40 shrink-0"
+                  aria-label={`Sample all tracks by ${artist.name}`}
+                >
+                  <Scissors size={12} />
+                </button>
+              </div>
               {isOpen &&
                 artist.albums.map((album) => {
                   const key = `${artist.name}//${album.name}`;
@@ -199,20 +220,31 @@ export function LibraryTree({ rows, libRoot, anyFilter, onOpenStatus }: LibraryT
                   const albumCounts = countsFor(album.tracks);
                   return (
                     <div key={key}>
-                      <button
-                        onClick={() => toggleAlbum(key)}
-                        className="w-full flex items-center gap-2 pl-8 pr-3 py-1
-                                   text-left hover:bg-surface/20 text-fg italic text-sm"
-                      >
-                        {alOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                        <span className="flex-1 truncate">{album.name}</span>
-                        <span className="text-xs text-muted not-italic">
-                          {album.tracks.length} tracks
-                        </span>
-                        <span className="text-xs text-muted not-italic hidden md:inline">
-                          {breakdown(albumCounts)}
-                        </span>
-                      </button>
+                      <div className="w-full flex items-center pr-2 py-1 hover:bg-surface/20">
+                        <button
+                          onClick={() => toggleAlbum(key)}
+                          className="flex-1 min-w-0 flex items-center gap-2 pl-8 pr-2
+                                     text-left text-fg italic text-sm"
+                        >
+                          {alOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                          <span className="flex-1 truncate">{album.name}</span>
+                          <span className="text-xs text-muted not-italic">
+                            {album.tracks.length} tracks
+                          </span>
+                          <span className="text-xs text-muted not-italic hidden md:inline">
+                            {breakdown(albumCounts)}
+                          </span>
+                        </button>
+                        <button
+                          onClick={() => onSampleScope(`${artist.name} / ${album.name}`, album.tracks)}
+                          title={`Sample ${album.tracks.length} tracks from this release — 10s each`}
+                          className="ml-2 px-2 py-1 rounded text-muted hover:text-accent
+                                     hover:bg-surface/40 shrink-0"
+                          aria-label={`Sample release ${album.name}`}
+                        >
+                          <Scissors size={12} />
+                        </button>
+                      </div>
                       {alOpen &&
                         album.tracks.map((t, i) => (
                           <div

@@ -5,6 +5,9 @@ import { Section } from "./Section";
 import { cn } from "../lib/cn";
 import { uniquePairs } from "../lib/paths";
 import { createMirrorTree, type MirrorResult, type ScanRow } from "../lib/tauri";
+import { usePersistedBool } from "../lib/usePersistedString";
+
+const EXPANDED_KEY = "afqc-tauri.mirrortree.expanded";
 
 type State =
   | { kind: "idle" }
@@ -16,11 +19,14 @@ interface WorkspacePanelProps {
   rows: ScanRow[];
   libRoot: string;
   anyFilter: boolean;
+  /** Shared workspace destination — also consumed by SamplerPanel. */
+  dest: string;
+  setDest: (v: string) => void;
   onStatus: (s: { text: string; tone: "muted" | "warn" | "ok" | "alert" }) => void;
 }
 
-export function WorkspacePanel({ rows, libRoot, anyFilter, onStatus }: WorkspacePanelProps) {
-  const [dest, setDest] = useState("");
+export function WorkspacePanel({ rows, libRoot, anyFilter, dest, setDest, onStatus }: WorkspacePanelProps) {
+  const [expanded, setExpanded] = usePersistedBool(EXPANDED_KEY, true);
   const [sudo, setSudo] = useState(false);
   const [state, setState] = useState<State>({ kind: "idle" });
 
@@ -68,12 +74,16 @@ export function WorkspacePanel({ rows, libRoot, anyFilter, onStatus }: Workspace
   const canRun = !!dest.trim() && pairs.length > 0 && !running;
 
   return (
-    <Section title="Workspace · Mirror tree" icon={<FolderTree size={16} />}>
+    <Section
+      title="Mirror tree"
+      icon={<FolderTree size={16} />}
+      onTitleClick={() => setExpanded(!expanded)}
+    >
+      {expanded && (
+        <>
       <p className="text-xs text-muted">
-        Mirror the structure of the {anyFilter ? "currently filtered" : "full"} library
-        as empty <code className="text-fg/80">artist/release/</code> folders under a
-        destination of your choice. Later operations can read from the source library
-        and write processed files into the matching folders here.
+        Mirror the parent directory as:{" "}
+        <code className="text-fg/80">/empty-mirror/artist/release/</code>
       </p>
 
       <div>
@@ -107,13 +117,12 @@ export function WorkspacePanel({ rows, libRoot, anyFilter, onStatus }: Workspace
       </div>
 
       <div className="rounded-md bg-bg/50 px-3 py-2 text-xs text-fg">
-        Will create{" "}
         <span className="font-semibold">{artistCount.toLocaleString()}</span> artist
-        folder{artistCount === 1 ? "" : "s"} and{" "}
+        folder{artistCount === 1 ? "" : "s"},{" "}
         <span className="font-semibold">{pairs.length.toLocaleString()}</span> release
-        folder{pairs.length === 1 ? "" : "s"} from{" "}
+        {pairs.length === 1 ? "" : "s"},{" "}
         <span className="font-semibold">{rows.length.toLocaleString()}</span>{" "}
-        {anyFilter ? "filtered" : ""} track{rows.length === 1 ? "" : "s"}.
+        {anyFilter ? "filtered " : ""}track{rows.length === 1 ? "" : "s"}
         {pairs.length === 0 && (
           <span className="block text-muted mt-1">
             Nothing to mirror — load a scan or clear the filter.
@@ -178,6 +187,8 @@ export function WorkspacePanel({ rows, libRoot, anyFilter, onStatus }: Workspace
         <pre className="text-xs text-alert font-mono break-all whitespace-pre-wrap">
           {state.message}
         </pre>
+      )}
+        </>
       )}
     </Section>
   );

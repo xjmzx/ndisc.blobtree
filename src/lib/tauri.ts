@@ -5,14 +5,14 @@ export type Verdict =
   | "LOSSLESS"
   | "PROBABLY-LOSSY"
   | "UNCERTAIN"
-  | "NOT-FLAC"
+  | "LOSSY"
   | "UNKNOWN";
 
 export const VERDICTS: Verdict[] = [
   "LOSSLESS",
   "PROBABLY-LOSSY",
   "UNCERTAIN",
-  "NOT-FLAC",
+  "LOSSY",
   "UNKNOWN",
 ];
 
@@ -37,7 +37,7 @@ export interface ScanProgress {
   verdict: Verdict;
 }
 
-export interface FlacCount {
+export interface AudioCount {
   fileCount: number;
   totalBytes: number;
 }
@@ -60,8 +60,8 @@ export async function scanLibrary(
   return invoke<ScanReport>("scan_library", { root, workers: workers ?? null });
 }
 
-export async function countFlacFiles(root: string): Promise<FlacCount> {
-  return invoke<FlacCount>("count_flac_files", { root });
+export async function countAudioFiles(root: string): Promise<AudioCount> {
+  return invoke<AudioCount>("count_audio_files", { root });
 }
 
 export async function cancelScan(): Promise<void> {
@@ -98,6 +98,61 @@ export async function onScanProgress(
   cb: (p: ScanProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<ScanProgress>("scan-progress", (event) => cb(event.payload));
+}
+
+// ---- sampler -----------------------------------------------------------
+
+export interface SampleItem {
+  src: string;
+  dest: string;
+}
+
+export type SampleOutcome =
+  | "Created"
+  | "Skipped"
+  | "Failed"
+  | "TimedOut"
+  | "Cancelled";
+
+export interface SampleProgress {
+  done: number;
+  total: number;
+  path: string;
+  outcome: SampleOutcome;
+}
+
+export interface SampleReport {
+  total: number;
+  created: number;
+  skipped: number;
+  failed: number;
+  timedOut: number;
+  cancelled: number;
+  errors: string[];
+}
+
+export async function sampleTracks(
+  items: SampleItem[],
+  durationSecs: number,
+  startOffsetSecs: number,
+  workers?: number,
+): Promise<SampleReport> {
+  return invoke<SampleReport>("sample_tracks", {
+    items,
+    durationSecs,
+    startOffsetSecs,
+    workers: workers ?? null,
+  });
+}
+
+export async function cancelSample(): Promise<void> {
+  await invoke("cancel_sample");
+}
+
+export async function onSampleProgress(
+  cb: (p: SampleProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<SampleProgress>("sample-progress", (event) => cb(event.payload));
 }
 
 // ---- nostr reactions (kind:7 / kind:5 via Rust signing) ----

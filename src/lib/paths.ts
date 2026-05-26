@@ -28,3 +28,34 @@ export function uniquePairs(rows: ScanRow[], libRoot: string): MirrorPair[] {
   }
   return pairs;
 }
+
+/**
+ * Compute the sample output path for one source track.
+ * `<srcRoot>/Artist/Album/track.flac` → `<destRoot>/Artist/Album/track.10s.flac`.
+ * Falls back to a flat basename under destRoot for paths outside srcRoot
+ * (shouldn't happen with scan results, but defensive).
+ */
+export function sampleDestPath(
+  srcPath: string,
+  srcRoot: string,
+  destRoot: string,
+  durationSecs: number,
+): string {
+  const sr = srcRoot.replace(/\/+$/, "");
+  const dr = destRoot.replace(/\/+$/, "");
+  const stripExt = (n: string) => {
+    const i = n.lastIndexOf(".");
+    return i < 0 ? n : n.substring(0, i);
+  };
+  const suffix = `.${durationSecs}s.flac`;
+  if (sr && srcPath.startsWith(sr + "/")) {
+    const rel = srcPath.substring(sr.length + 1);
+    const parts = rel.split("/");
+    const base = parts.pop() || "sample";
+    const subDir = parts.join("/");
+    const baseOut = stripExt(base) + suffix;
+    return subDir ? `${dr}/${subDir}/${baseOut}` : `${dr}/${baseOut}`;
+  }
+  const base = srcPath.split("/").pop() || "sample";
+  return `${dr}/${stripExt(base) + suffix}`;
+}

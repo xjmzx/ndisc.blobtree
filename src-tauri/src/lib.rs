@@ -32,6 +32,13 @@ const HIGHPASS_HZ: u32 = 16_000;
 const LOSSY_DB: f32 = -65.0;
 const LOSSLESS_DB: f32 = -35.0;
 const ANALYSIS_SECS: u32 = 30;
+// Audio file extensions the scanner picks up. FLAC stays the focus
+// (spectral heuristic only runs on it); other formats are categorized
+// by codec name alone — no ffmpeg decode for lossy-by-design files.
+const AUDIO_EXTS: &[&str] = &[
+    "flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "aiff", "aif",
+    "ape", "wv", "tak", "alac", "mp2", "wma",
+];
 // Wall-clock caps per child process. ffmpeg with ANALYSIS_SECS=30 normally
 // finishes in 1–5s on modern hardware; 60s leaves >10× headroom so legitimate
 // scans never trip the cap. ffprobe is metadata-only and should be near
@@ -56,14 +63,20 @@ fn keyring_service() -> &'static str {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 enum Verdict {
+    /// FLAC passes spectral OR codec is natively lossless (ALAC, PCM-*, APE, …).
     #[serde(rename = "LOSSLESS")]
     Lossless,
+    /// FLAC fails the spectral check (peak above 16 kHz ≤ −65 dB).
     #[serde(rename = "PROBABLY-LOSSY")]
     ProbablyLossy,
+    /// FLAC between thresholds — could be genuine quiet/ambient lossless.
     #[serde(rename = "UNCERTAIN")]
     Uncertain,
-    #[serde(rename = "NOT-FLAC")]
-    NotFlac,
+    /// Codec is lossy by design (MP3, AAC, Opus, …) — separate from
+    /// PROBABLY-LOSSY since this is honest lossy, not lossy-pretending.
+    #[serde(rename = "LOSSY")]
+    Lossy,
+    /// ffprobe failed, unrecognized codec, or missing sample rate on a FLAC.
     #[serde(rename = "UNKNOWN")]
     Unknown,
 }
@@ -103,6 +116,57 @@ impl ScanCancel {
         Self(Arc::new(AtomicBool::new(false)))
     }
 }
+
+/// Sibling of [`ScanCancel`] for the Sampler — separate so cancelling
+/// a sample doesn't interrupt a concurrent scan, and vice versa.
+struct SampleCancel(Arc<AtomicBool>);
+
+impl SampleCancel {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SampleItem {
+    src: String,
+    dest: String,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+enum SampleOutcome {
+    Created,
+    Skipped,
+    Failed,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SampleProgress {
+    done: usize,
+    total: usize,
+    path: String,
+    outcome: SampleOutcome,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SampleReport {
+    total: usize,
+    created: usize,
+    skipped: usize,
+    failed: usize,
+    timed_out: usize,
+    cancelled: usize,
+    /// Up to `ERROR_SAMPLE` source paths for files that failed/timed out,
+    /// surfaced so the user can inspect or retry. Not the full list.
+    errors: Vec<String>,
+}
+
+const ERROR_SAMPLE: usize = 20;
 
 // ---- ffprobe + ffmpeg --------------------------------------------------
 
@@ -210,6 +274,30 @@ fn measure_high_band_peak(path: &Path, cutoff_hz: u32, vol_re: &Regex) -> PeakOu
     }
 }
 
+/// Codec → categorisation. FLAC routes to the spectral check; other
+/// audio codecs are tagged by their codec name. Returns `None` for
+/// codecs we don't recognise (caller marks Unknown).
+fn codec_category(codec: &str) -> Option<Verdict> {
+    if codec == "flac" {
+        return None; // signal: caller should run the spectral check
+    }
+    // Native lossless families recognised by ffprobe. PCM covers WAV /
+    // AIFF / raw — every pcm_* sub-codec stays lossless.
+    if matches!(codec, "alac" | "wavpack" | "ape" | "tak")
+        || codec.starts_with("pcm_")
+    {
+        return Some(Verdict::Lossless);
+    }
+    // Codecs that are lossy by design.
+    if matches!(
+        codec,
+        "mp3" | "aac" | "opus" | "vorbis" | "ac3" | "eac3" | "wma" | "wmav1" | "wmav2" | "mp2"
+    ) {
+        return Some(Verdict::Lossy);
+    }
+    None
+}
+
 fn classify(path: &Path, vol_re: &Regex) -> ScanRow {
     let path_str = path.to_string_lossy().into_owned();
     let (codec, sr) = match ffprobe_fields(path) {
@@ -242,13 +330,31 @@ fn classify(path: &Path, vol_re: &Regex) -> ScanRow {
             info: "ffprobe: no codec".into(),
         };
     };
-    if codec != "flac" {
+
+    // Non-FLAC codecs: categorise by codec name alone — no ffmpeg pass.
+    if let Some(verdict) = codec_category(&codec) {
+        let kind = match verdict {
+            Verdict::Lossless => "native lossless",
+            Verdict::Lossy => "lossy",
+            _ => "categorised",
+        };
         return ScanRow {
-            verdict: Verdict::NotFlac,
+            verdict,
             path: path_str,
             peak: None,
             sr,
-            info: format!("codec={codec}"),
+            info: format!("{kind} · codec={codec}"),
+        };
+    }
+
+    // FLAC path: the spectral heuristic gates this — same as before.
+    if codec != "flac" {
+        return ScanRow {
+            verdict: Verdict::Unknown,
+            path: path_str,
+            peak: None,
+            sr,
+            info: format!("unrecognised codec={codec}"),
         };
     }
     let Some(sr_val) = sr else {
@@ -257,7 +363,7 @@ fn classify(path: &Path, vol_re: &Regex) -> ScanRow {
             path: path_str,
             peak: None,
             sr,
-            info: "no sample rate".into(),
+            info: "flac · no sample rate".into(),
         };
     };
 
@@ -291,7 +397,7 @@ fn classify(path: &Path, vol_re: &Regex) -> ScanRow {
         }
     };
 
-    let info = format!("peak>{cutoff}Hz={peak:+.1}dB sr={sr_val}");
+    let info = format!("flac · peak>{cutoff}Hz={peak:+.1}dB sr={sr_val}");
     let verdict = if peak <= LOSSY_DB {
         Verdict::ProbablyLossy
     } else if peak >= LOSSLESS_DB {
@@ -312,13 +418,24 @@ fn classify(path: &Path, vol_re: &Regex) -> ScanRow {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct FlacCount {
+struct AudioCount {
     file_count: usize,
     total_bytes: u64,
 }
 
+/// True if the path's extension matches one of [`AUDIO_EXTS`]. Case-insensitive.
+fn has_audio_ext(p: &Path) -> bool {
+    p.extension()
+        .and_then(|x| x.to_str())
+        .map(|x| {
+            let lower = x.to_ascii_lowercase();
+            AUDIO_EXTS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
+}
+
 #[tauri::command]
-async fn count_flac_files(root: String) -> Result<FlacCount, String> {
+async fn count_audio_files(root: String) -> Result<AudioCount, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root_pb = PathBuf::from(&root);
         if !root_pb.is_dir() {
@@ -327,16 +444,7 @@ async fn count_flac_files(root: String) -> Result<FlacCount, String> {
         let mut file_count = 0usize;
         let mut total_bytes = 0u64;
         for entry in WalkDir::new(&root_pb).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let is_flac = entry
-                .path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.eq_ignore_ascii_case("flac"))
-                .unwrap_or(false);
-            if !is_flac {
+            if !entry.file_type().is_file() || !has_audio_ext(entry.path()) {
                 continue;
             }
             file_count += 1;
@@ -344,7 +452,7 @@ async fn count_flac_files(root: String) -> Result<FlacCount, String> {
                 total_bytes = total_bytes.saturating_add(meta.len());
             }
         }
-        Ok(FlacCount { file_count, total_bytes })
+        Ok(AudioCount { file_count, total_bytes })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -540,20 +648,13 @@ fn scan_inner(
     let files: Vec<PathBuf> = WalkDir::new(&root_pb)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.path()
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    .map(|x| x.eq_ignore_ascii_case("flac"))
-                    .unwrap_or(false)
-        })
+        .filter(|e| e.file_type().is_file() && has_audio_ext(e.path()))
         .map(|e| e.path().to_path_buf())
         .collect();
 
     let total = files.len();
     if total == 0 {
-        return Err(format!("no .flac files under {root}"));
+        return Err(format!("no audio files under {root}"));
     }
 
     let worker_count = workers
@@ -600,6 +701,159 @@ fn scan_inner(
         rows,
     })
 }
+
+// ---- sampler -----------------------------------------------------------
+
+/// Extracts a fixed-length clip from one source file into dest. ffmpeg
+/// `-ss <offset> -t <dur>` placed BEFORE `-i` for input-side seek (fast
+/// even on huge files; doesn't decode-and-discard). `-c:a flac` re-encodes
+/// to a self-contained FLAC. Idempotent: existing dest files are skipped.
+/// Partial output from a failed run is removed.
+fn sample_one(item: &SampleItem, duration_secs: u32, start_offset_secs: u32) -> SampleOutcome {
+    let src = Path::new(&item.src);
+    let dest = Path::new(&item.dest);
+
+    if dest.exists() {
+        return SampleOutcome::Skipped;
+    }
+    if let Some(parent) = dest.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return SampleOutcome::Failed;
+        }
+    }
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args([
+        "-nostdin",
+        "-ss", &start_offset_secs.to_string(),
+        "-t", &duration_secs.to_string(),
+        "-i",
+    ])
+    .arg(src)
+    .args(["-c:a", "flac", "-y"])
+    .arg(dest);
+
+    match run_with_timeout(cmd, Duration::from_secs(FFMPEG_TIMEOUT_SECS)) {
+        RunOutcome::Ok(out) => {
+            if out.status.success() {
+                SampleOutcome::Created
+            } else {
+                let _ = fs::remove_file(dest);
+                SampleOutcome::Failed
+            }
+        }
+        RunOutcome::TimedOut => {
+            let _ = fs::remove_file(dest);
+            SampleOutcome::TimedOut
+        }
+        RunOutcome::Failed => SampleOutcome::Failed,
+    }
+}
+
+#[tauri::command]
+async fn sample_tracks(
+    items: Vec<SampleItem>,
+    duration_secs: u32,
+    start_offset_secs: u32,
+    workers: Option<usize>,
+    app: AppHandle,
+    cancel: tauri::State<'_, SampleCancel>,
+) -> Result<SampleReport, String> {
+    let flag = cancel.0.clone();
+    flag.store(false, Ordering::Relaxed);
+    tauri::async_runtime::spawn_blocking(move || {
+        sample_inner(items, duration_secs, start_offset_secs, workers, app, flag)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn cancel_sample(cancel: tauri::State<SampleCancel>) {
+    cancel.0.store(true, Ordering::Relaxed);
+}
+
+fn sample_inner(
+    items: Vec<SampleItem>,
+    duration_secs: u32,
+    start_offset_secs: u32,
+    workers: Option<usize>,
+    app: AppHandle,
+    cancel: Arc<AtomicBool>,
+) -> Result<SampleReport, String> {
+    let total = items.len();
+    if total == 0 {
+        return Err("no items to sample".into());
+    }
+
+    let worker_count = workers
+        .or_else(|| available_parallelism().ok().map(|n| (n.get() / 2).max(2)))
+        .unwrap_or(2);
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let done = AtomicUsize::new(0);
+
+    let outcomes: Vec<SampleOutcome> = pool.install(|| {
+        items
+            .par_iter()
+            .map(|item| {
+                let outcome = if cancel.load(Ordering::Relaxed) {
+                    SampleOutcome::Cancelled
+                } else {
+                    sample_one(item, duration_secs, start_offset_secs)
+                };
+                let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = app.emit(
+                    "sample-progress",
+                    SampleProgress {
+                        done: d,
+                        total,
+                        path: item.src.clone(),
+                        outcome,
+                    },
+                );
+                outcome
+            })
+            .collect()
+    });
+
+    let mut report = SampleReport {
+        total,
+        created: 0,
+        skipped: 0,
+        failed: 0,
+        timed_out: 0,
+        cancelled: 0,
+        errors: Vec::new(),
+    };
+    for (item, o) in items.iter().zip(outcomes.iter()) {
+        match o {
+            SampleOutcome::Created => report.created += 1,
+            SampleOutcome::Skipped => report.skipped += 1,
+            SampleOutcome::Failed => {
+                report.failed += 1;
+                if report.errors.len() < ERROR_SAMPLE {
+                    report.errors.push(item.src.clone());
+                }
+            }
+            SampleOutcome::TimedOut => {
+                report.timed_out += 1;
+                if report.errors.len() < ERROR_SAMPLE {
+                    report.errors.push(format!("{} (timed out)", item.src));
+                }
+            }
+            SampleOutcome::Cancelled => report.cancelled += 1,
+        }
+    }
+
+    Ok(report)
+}
+
+// ---- report cache ------------------------------------------------------
 
 /// Debug builds (`tauri dev`) get a sibling app-data dir with a `.dev`
 /// suffix, so dev runs don't pollute the installed binary's scan report.
@@ -879,10 +1133,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(ScanCancel::new())
+        .manage(SampleCancel::new())
         .invoke_handler(tauri::generate_handler![
             scan_library,
             cancel_scan,
-            count_flac_files,
+            sample_tracks,
+            cancel_sample,
+            count_audio_files,
             create_mirror_tree,
             load_report,
             save_report,

@@ -2,6 +2,9 @@ import { useEffect, useRef } from "react";
 import { ChevronDown, Filter, Search } from "lucide-react";
 import { Section } from "./Section";
 import { VERDICTS, type Verdict } from "../lib/tauri";
+import { usePersistedBool } from "../lib/usePersistedString";
+
+const EXPANDED_KEY = "afqc-tauri.filter.expanded";
 
 export interface FilterState {
   verdict: "All" | Verdict;
@@ -19,11 +22,12 @@ const VERDICT_COLOR: Record<Verdict, string> = {
   LOSSLESS: "text-ok",
   "PROBABLY-LOSSY": "text-alert",
   UNCERTAIN: "text-warn",
-  "NOT-FLAC": "text-muted",
+  LOSSY: "text-mauve",
   UNKNOWN: "text-muted",
 };
 
 export function Filters({ filter, setFilter, counts, total }: FiltersProps) {
+  const [expanded, setExpanded] = usePersistedBool(EXPANDED_KEY, true);
   const searchRef = useRef<HTMLInputElement>(null);
 
   // Ctrl+F focuses the search box (matches the Tk app's binding).
@@ -39,7 +43,12 @@ export function Filters({ filter, setFilter, counts, total }: FiltersProps) {
   }, []);
 
   return (
-    <Section title="Filter" icon={<Filter size={16} />}>
+    <Section
+      title="Filter"
+      icon={<Filter size={16} />}
+      onTitleClick={() => setExpanded(!expanded)}
+    >
+      {expanded && (
       <div className="flex flex-wrap gap-3 items-center">
         {/* appearance-none + custom chevron because WebKit2GTK applies the
             system GTK theme to native <select> (often white-on-grey),
@@ -94,6 +103,7 @@ export function Filters({ filter, setFilter, counts, total }: FiltersProps) {
           </div>
         )}
       </div>
+      )}
     </Section>
   );
 }
