@@ -3,6 +3,7 @@ import { KeyRound, Lock } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { SimplePool } from "nostr-tools";
 import { ScannerControls } from "./components/ScannerControls";
+import { SamplerPanel } from "./components/SamplerPanel";
 import { Filters, type FilterState } from "./components/Filters";
 import { LibraryTree } from "./components/LibraryTree";
 import { StatusBar } from "./components/StatusBar";
@@ -196,6 +197,11 @@ export default function App() {
               setReport(r);
               setRoot(r.root);
             }}
+            onStatus={setStatus}
+          />
+          <SamplerPanel
+            rows={filteredRows}
+            anyFilter={anyFilter}
             onStatus={setStatus}
           />
           <Filters
