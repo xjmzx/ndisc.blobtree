@@ -64,6 +64,10 @@ export async function countFlacFiles(root: string): Promise<FlacCount> {
   return invoke<FlacCount>("count_flac_files", { root });
 }
 
+export async function cancelScan(): Promise<void> {
+  await invoke("cancel_scan");
+}
+
 export async function createMirrorTree(
   dest: string,
   sourceRoot: string,

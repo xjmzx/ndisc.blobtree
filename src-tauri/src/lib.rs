@@ -7,10 +7,15 @@
 //   - open_folder: xdg-open on the containing folder (double-click action).
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::process::{Command, Output as ProcessOutput, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::available_parallelism;
+use std::time::Duration;
+
+use wait_timeout::ChildExt;
 
 use keyring::Entry;
 use nostr::nips::nip19::{FromBech32, ToBech32};
@@ -26,6 +31,13 @@ use walkdir::WalkDir;
 const HIGHPASS_HZ: u32 = 16_000;
 const LOSSY_DB: f32 = -65.0;
 const LOSSLESS_DB: f32 = -35.0;
+const ANALYSIS_SECS: u32 = 30;
+// Wall-clock caps per child process. ffmpeg with ANALYSIS_SECS=30 normally
+// finishes in 1–5s on modern hardware; 60s leaves >10× headroom so legitimate
+// scans never trip the cap. ffprobe is metadata-only and should be near
+// instant. Tripping either signals a genuine hang (corrupt input, NFS stall).
+const FFMPEG_TIMEOUT_SECS: u64 = 60;
+const FFPROBE_TIMEOUT_SECS: u64 = 15;
 const REPORT_FILENAME: &str = "last_scan.json";
 const KEYRING_SERVICE_RELEASE: &str = "audio-flac-quality-check-tauri";
 const KEYRING_SERVICE_DEV: &str = "audio-flac-quality-check-tauri-dev";
@@ -80,57 +92,154 @@ struct ScanProgress {
     verdict: Verdict,
 }
 
-// ---- ffprobe + ffmpeg --------------------------------------------------
+/// Tauri-managed cancel flag for the running scan. `cancel_scan` flips
+/// it to true; `scan_library` clears it at start; `scan_inner`'s par_iter
+/// short-circuits per-file when set. In-flight ffmpeg calls finish (≤30s
+/// with the ANALYSIS_SECS cap) — no mid-process kill.
+struct ScanCancel(Arc<AtomicBool>);
 
-fn ffprobe_fields(path: &Path) -> (Option<String>, Option<u32>) {
-    let out = Command::new("ffprobe")
-        .args([
-            "-v", "error",
-            "-select_streams", "a:0",
-            "-show_entries", "stream=codec_name,sample_rate",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-        ])
-        .arg(path)
-        .output();
-    let Ok(out) = out else {
-        return (None, None);
-    };
-    if !out.status.success() {
-        return (None, None);
+impl ScanCancel {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
     }
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut lines = s.lines();
-    let codec = lines.next().map(str::trim).filter(|x| !x.is_empty()).map(String::from);
-    let sr = lines.next().and_then(|s| s.trim().parse::<u32>().ok());
-    (codec, sr)
 }
 
-fn measure_high_band_peak(path: &Path, cutoff_hz: u32, vol_re: &Regex) -> Option<f32> {
-    let out = Command::new("ffmpeg")
-        .args(["-nostdin", "-i"])
+// ---- ffprobe + ffmpeg --------------------------------------------------
+
+/// Outcome of `run_with_timeout`. `TimedOut` is distinguished from `Failed`
+/// so the caller can surface "this file took too long" separately from
+/// "spawn failed / non-zero exit".
+enum RunOutcome {
+    Ok(ProcessOutput),
+    TimedOut,
+    Failed,
+}
+
+/// `Command::output()` with a wall-clock cap. On timeout, kill the child
+/// and reap it so the process slot is released. stdout/stderr are piped so
+/// callers that parse stderr (ffmpeg's volumedetect line) keep working.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> RunOutcome {
+    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(c) => c,
+        Err(_) => return RunOutcome::Failed,
+    };
+    let status = match child.wait_timeout(timeout) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return RunOutcome::TimedOut;
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return RunOutcome::Failed;
+        }
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut h) = child.stdout.take() { let _ = h.read_to_end(&mut stdout); }
+    if let Some(mut h) = child.stderr.take() { let _ = h.read_to_end(&mut stderr); }
+    RunOutcome::Ok(ProcessOutput { status, stdout, stderr })
+}
+
+enum FfprobeOutcome {
+    Ok { codec: Option<String>, sr: Option<u32> },
+    TimedOut,
+    Failed,
+}
+
+fn ffprobe_fields(path: &Path) -> FfprobeOutcome {
+    let mut cmd = Command::new("ffprobe");
+    cmd.args([
+        "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=codec_name,sample_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+    ])
+    .arg(path);
+    match run_with_timeout(cmd, Duration::from_secs(FFPROBE_TIMEOUT_SECS)) {
+        RunOutcome::Ok(out) => {
+            if !out.status.success() {
+                return FfprobeOutcome::Failed;
+            }
+            let s = String::from_utf8_lossy(&out.stdout);
+            let mut lines = s.lines();
+            let codec = lines.next().map(str::trim).filter(|x| !x.is_empty()).map(String::from);
+            let sr = lines.next().and_then(|s| s.trim().parse::<u32>().ok());
+            FfprobeOutcome::Ok { codec, sr }
+        }
+        RunOutcome::TimedOut => FfprobeOutcome::TimedOut,
+        RunOutcome::Failed => FfprobeOutcome::Failed,
+    }
+}
+
+enum PeakOutcome {
+    Ok(f32),
+    TimedOut,
+    Failed,
+}
+
+fn measure_high_band_peak(path: &Path, cutoff_hz: u32, vol_re: &Regex) -> PeakOutcome {
+    // Cap analysis to the first ANALYSIS_SECS of audio. A lossy encoder
+    // applies the same band-cut to the entire file, so the peak above the
+    // cutoff is consistent across the track — no point decoding a 60-min
+    // FLAC end to end.
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-nostdin", "-t", &ANALYSIS_SECS.to_string(), "-i"])
         .arg(path)
         .args([
             "-af",
             &format!("highpass=f={cutoff_hz},volumedetect"),
             "-f", "null", "-",
-        ])
-        .output()
-        .ok()?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let caps = vol_re.captures(&stderr)?;
-    caps.get(1)?.as_str().parse::<f32>().ok()
+        ]);
+    match run_with_timeout(cmd, Duration::from_secs(FFMPEG_TIMEOUT_SECS)) {
+        RunOutcome::Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            match vol_re
+                .captures(&stderr)
+                .and_then(|c| c.get(1))
+                .and_then(|m| m.as_str().parse::<f32>().ok())
+            {
+                Some(v) => PeakOutcome::Ok(v),
+                None => PeakOutcome::Failed,
+            }
+        }
+        RunOutcome::TimedOut => PeakOutcome::TimedOut,
+        RunOutcome::Failed => PeakOutcome::Failed,
+    }
 }
 
 fn classify(path: &Path, vol_re: &Regex) -> ScanRow {
     let path_str = path.to_string_lossy().into_owned();
-    let (codec, sr) = ffprobe_fields(path);
+    let (codec, sr) = match ffprobe_fields(path) {
+        FfprobeOutcome::Ok { codec, sr } => (codec, sr),
+        FfprobeOutcome::TimedOut => {
+            return ScanRow {
+                verdict: Verdict::Unknown,
+                path: path_str,
+                peak: None,
+                sr: None,
+                info: format!("ffprobe timed out ({FFPROBE_TIMEOUT_SECS}s)"),
+            };
+        }
+        FfprobeOutcome::Failed => {
+            return ScanRow {
+                verdict: Verdict::Unknown,
+                path: path_str,
+                peak: None,
+                sr: None,
+                info: "ffprobe failed".into(),
+            };
+        }
+    };
     let Some(codec) = codec else {
         return ScanRow {
             verdict: Verdict::Unknown,
             path: path_str,
             peak: None,
             sr: None,
-            info: "ffprobe failed".into(),
+            info: "ffprobe: no codec".into(),
         };
     };
     if codec != "flac" {
@@ -160,15 +269,26 @@ fn classify(path: &Path, vol_re: &Regex) -> ScanRow {
         HIGHPASS_HZ
     };
 
-    let peak = measure_high_band_peak(path, cutoff, vol_re);
-    let Some(peak) = peak else {
-        return ScanRow {
-            verdict: Verdict::Unknown,
-            path: path_str,
-            peak: None,
-            sr,
-            info: "ffmpeg/volumedetect failed".into(),
-        };
+    let peak = match measure_high_band_peak(path, cutoff, vol_re) {
+        PeakOutcome::Ok(p) => p,
+        PeakOutcome::TimedOut => {
+            return ScanRow {
+                verdict: Verdict::Unknown,
+                path: path_str,
+                peak: None,
+                sr,
+                info: format!("ffmpeg timed out ({FFMPEG_TIMEOUT_SECS}s)"),
+            };
+        }
+        PeakOutcome::Failed => {
+            return ScanRow {
+                verdict: Verdict::Unknown,
+                path: path_str,
+                peak: None,
+                sr,
+                info: "ffmpeg/volumedetect failed".into(),
+            };
+        }
     };
 
     let info = format!("peak>{cutoff}Hz={peak:+.1}dB sr={sr_val}");
@@ -392,13 +512,26 @@ async fn scan_library(
     root: String,
     workers: Option<usize>,
     app: AppHandle,
+    cancel: tauri::State<'_, ScanCancel>,
 ) -> Result<ScanReport, String> {
-    tauri::async_runtime::spawn_blocking(move || scan_inner(root, workers, app))
+    let flag = cancel.0.clone();
+    flag.store(false, Ordering::Relaxed);
+    tauri::async_runtime::spawn_blocking(move || scan_inner(root, workers, app, flag))
         .await
         .map_err(|e| e.to_string())?
 }
 
-fn scan_inner(root: String, workers: Option<usize>, app: AppHandle) -> Result<ScanReport, String> {
+#[tauri::command]
+fn cancel_scan(cancel: tauri::State<ScanCancel>) {
+    cancel.0.store(true, Ordering::Relaxed);
+}
+
+fn scan_inner(
+    root: String,
+    workers: Option<usize>,
+    app: AppHandle,
+    cancel: Arc<AtomicBool>,
+) -> Result<ScanReport, String> {
     let root_pb = PathBuf::from(&root);
     if !root_pb.is_dir() {
         return Err(format!("not a directory: {root}"));
@@ -438,7 +571,13 @@ fn scan_inner(root: String, workers: Option<usize>, app: AppHandle) -> Result<Sc
     let rows: Vec<ScanRow> = pool.install(|| {
         files
             .par_iter()
-            .map(|p| {
+            .filter_map(|p| {
+                // Cancel honoured at file-grain — files already inside
+                // `classify` keep going to completion (capped by
+                // ANALYSIS_SECS) but no new work is started.
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
                 let row = classify(p, &vol_re);
                 let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                 let _ = app.emit(
@@ -450,7 +589,7 @@ fn scan_inner(root: String, workers: Option<usize>, app: AppHandle) -> Result<Sc
                         verdict: row.verdict,
                     },
                 );
-                row
+                Some(row)
             })
             .collect()
     });
@@ -739,8 +878,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(ScanCancel::new())
         .invoke_handler(tauri::generate_handler![
             scan_library,
+            cancel_scan,
             count_flac_files,
             create_mirror_tree,
             load_report,

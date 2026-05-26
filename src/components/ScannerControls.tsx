@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, RefreshCw, ScanLine } from "lucide-react";
+import { FolderOpen, RefreshCw, ScanLine, Square } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Section } from "./Section";
 import { cn } from "../lib/cn";
 import {
+  cancelScan,
   countFlacFiles,
   onScanProgress,
   saveReport,
@@ -49,7 +50,11 @@ function formatEta(seconds: number): string {
 export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerControlsProps) {
   const [state, setState] = useState<State>({ kind: "idle" });
   const [progress, setProgress] = useState<ScanProgress | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const unlistenRef = useRef<(() => void) | null>(null);
+  // Mirrors `cancelling` for the async closure in startScan — state would
+  // be stale across the awaited scanLibrary call.
+  const cancelledRef = useRef(false);
 
   // Ctrl+R triggers the count step (matches the Tk app's shortcut).
   useEffect(() => {
@@ -100,6 +105,8 @@ export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerCo
     if (state.kind !== "confirming") return;
     setState({ kind: "scanning" });
     setProgress(null);
+    setCancelling(false);
+    cancelledRef.current = false;
     onStatus({ text: "starting scan…", tone: "warn" });
 
     try {
@@ -108,18 +115,39 @@ export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerCo
       const report = await scanLibrary(root.trim());
       onReport(report);
       await saveReport(report);
-      onStatus({
-        text: `scan complete · ${report.rows.length.toLocaleString()} files`,
-        tone: "ok",
-      });
+      if (cancelledRef.current) {
+        onStatus({
+          text: `scan cancelled · ${report.rows.length.toLocaleString()} files scanned`,
+          tone: "warn",
+        });
+      } else {
+        onStatus({
+          text: `scan complete · ${report.rows.length.toLocaleString()} files`,
+          tone: "ok",
+        });
+      }
     } catch (e) {
       onStatus({ text: `scan failed: ${e}`, tone: "alert" });
     } finally {
       setState({ kind: "idle" });
       setProgress(null);
+      setCancelling(false);
       unlistenRef.current?.();
       unlistenRef.current = null;
     }
+  }
+
+  async function stopScan() {
+    if (state.kind !== "scanning" || cancelledRef.current) return;
+    cancelledRef.current = true;
+    setCancelling(true);
+    try {
+      await cancelScan();
+    } catch (e) {
+      // Best-effort — the flag may already be set by the time this runs.
+      console.warn("cancel_scan failed", e);
+    }
+    onStatus({ text: "cancelling… waiting for in-flight files", tone: "muted" });
   }
 
   function cancelConfirm() {
@@ -157,24 +185,37 @@ export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerCo
           <FolderOpen size={14} />
           Browse
         </button>
-        <button
-          onClick={requestScan}
-          disabled={busy || !root.trim()}
-          className={cn(
-            "px-3 py-2 rounded-md font-semibold",
-            "flex items-center gap-1.5",
-            "disabled:opacity-50 disabled:cursor-not-allowed",
-            "bg-accent text-bg hover:opacity-90",
-          )}
-          title="Re-scan (Ctrl+R)"
-        >
-          <RefreshCw size={14} className={state.kind === "counting" || scanning ? "animate-spin" : ""} />
-          {state.kind === "counting"
-            ? "counting…"
-            : scanning
-              ? "scanning…"
-              : "Re-scan"}
-        </button>
+        {scanning ? (
+          <button
+            onClick={stopScan}
+            disabled={cancelling}
+            className={cn(
+              "px-3 py-2 rounded-md font-semibold",
+              "flex items-center gap-1.5",
+              "disabled:opacity-50 disabled:cursor-not-allowed",
+              "bg-alert/15 text-alert hover:bg-alert hover:text-bg transition-colors",
+            )}
+            title="Stop scan — in-flight files finish, no new ones start"
+          >
+            <Square size={14} className={cancelling ? "animate-pulse" : ""} />
+            {cancelling ? "cancelling…" : "Stop"}
+          </button>
+        ) : (
+          <button
+            onClick={requestScan}
+            disabled={busy || !root.trim()}
+            className={cn(
+              "px-3 py-2 rounded-md font-semibold",
+              "flex items-center gap-1.5",
+              "disabled:opacity-50 disabled:cursor-not-allowed",
+              "bg-accent text-bg hover:opacity-90",
+            )}
+            title="Re-scan (Ctrl+R)"
+          >
+            <RefreshCw size={14} className={state.kind === "counting" ? "animate-spin" : ""} />
+            {state.kind === "counting" ? "counting…" : "Re-scan"}
+          </button>
+        )}
       </div>
 
       {state.kind === "confirming" && (
@@ -203,16 +244,14 @@ export function ScannerControls({ root, setRoot, onReport, onStatus }: ScannerCo
       )}
 
       {scanning && (
-        <div className="space-y-1.5">
-          <div className="flex justify-between text-xs text-muted font-mono">
-            <span className="truncate">
-              {progress
-                ? `${progress.done.toLocaleString()} / ${progress.total.toLocaleString()} · ${progress.path}`
-                : "discovering files…"}
-            </span>
-            <span>{pct}%</span>
+        <div className="mt-3 space-y-1.5">
+          <div className="text-xs text-muted font-mono truncate">
+            {progress
+              ? `${progress.done.toLocaleString()} / ${progress.total.toLocaleString()} · ${progress.path}`
+              : "discovering files…"}
           </div>
-          <div className="h-1.5 rounded-full bg-bg/60 overflow-hidden">
+          <div className="h-px bg-muted/40" />
+          <div className="h-0.5 rounded-full bg-bg/60 overflow-hidden">
             <div
               className="h-full bg-accent transition-[width] duration-150"
               style={{ width: `${pct}%` }}
